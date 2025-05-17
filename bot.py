@@ -1180,21 +1180,19 @@ async def handle_donation_acceptance(update: Update, context: ContextTypes.DEFAU
     ]
     donor_reply_markup = InlineKeyboardMarkup(donor_feedback_keyboard)
 
-    # Use the correct method to send the message based on update type
+    # IMPORTANT CHANGE: Always send a new message instead of trying to edit
     if hasattr(update, 'callback_query') and update.callback_query:
+        # First try to acknowledge the callback query
         try:
-            await update.callback_query.edit_message_text(donor_msg, reply_markup=None)
-            # Send a follow-up message with the feedback buttons
-            await update.callback_query.message.reply_text(
-                "After your donation, we'd love to hear about your experience!",
-                reply_markup=donor_reply_markup
-            )
+            await update.callback_query.answer("Donation accepted!")
         except Exception as e:
-            logger.error(f"Error editing message: {e}")
-            await update.callback_query.message.reply_text(
-                donor_msg,
-                reply_markup=donor_reply_markup
-            )
+            logger.error(f"Error acknowledging callback: {e}")
+        
+        # Then send a new message instead of editing the old one
+        await update.callback_query.message.reply_text(
+            donor_msg,
+            reply_markup=donor_reply_markup
+        )
     else:
         await update.message.reply_text(
             donor_msg,
