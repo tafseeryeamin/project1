@@ -1122,8 +1122,7 @@ async def handle_donation_decline(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def handle_donation_acceptance(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: str, donor_id: str) -> None:
-    """Handle when a donor accepts a blood donation request and share contact information."""
-    # Get donor and request information
+
     donor = db.get_donor_by_id(donor_id)
     request = db.get_request_by_id(request_id)
 
@@ -1180,19 +1179,21 @@ async def handle_donation_acceptance(update: Update, context: ContextTypes.DEFAU
     ]
     donor_reply_markup = InlineKeyboardMarkup(donor_feedback_keyboard)
 
-    # IMPORTANT CHANGE: Always send a new message instead of trying to edit
+    # Use the correct method to send the message based on update type
     if hasattr(update, 'callback_query') and update.callback_query:
-        # First try to acknowledge the callback query
         try:
-            await update.callback_query.answer("Donation accepted!")
+            await update.callback_query.edit_message_text(donor_msg, reply_markup=None)
+            # Send a follow-up message with the feedback buttons
+            await update.callback_query.message.reply_text(
+                "After your donation, we'd love to hear about your experience!",
+                reply_markup=donor_reply_markup
+            )
         except Exception as e:
-            logger.error(f"Error acknowledging callback: {e}")
-        
-        # Then send a new message instead of editing the old one
-        await update.callback_query.message.reply_text(
-            donor_msg,
-            reply_markup=donor_reply_markup
-        )
+            logger.error(f"Error editing message: {e}")
+            await update.callback_query.message.reply_text(
+                donor_msg,
+                reply_markup=donor_reply_markup
+            )
     else:
         await update.message.reply_text(
             donor_msg,
@@ -1227,6 +1228,55 @@ async def handle_donation_acceptance(update: Update, context: ContextTypes.DEFAU
             text=requester_msg,
             reply_markup=requester_reply_markup
         )
+
+        try:
+            # Get admin ID from environment variables
+            admin_id = os.getenv('ADMIN_ID', '0')
+
+            # Get total operations count
+            total_operations = get_total_successful_operations()
+
+            # Create a detailed admin notification
+            admin_msg = (
+                f"🎉 *SUCCESSFUL DONATION OPERATION #{total_operations}*\n\n"
+                f"*DONOR DETAILS:*\n"
+                f"ID: `{donor['id']}`\n"
+                f"Name: {donor['name']}\n"
+                f"Age: {donor['age']}\n"
+                f"Gender: {donor['gender']}\n"
+                f"Blood Group: {donor['blood_group']}\n"
+                f"Phone: `{donor['phone']}`\n"
+                f"Location: {donor['area']}, {donor['district']}, {donor['division']}\n"
+                f"Username: {f'@{donor_username}' if donor_username else 'Not available'}\n\n"
+
+                f"*RECIPIENT DETAILS:*\n"
+                f"ID: `{request['id']}`\n"
+                f"Patient: {request['name']}\n"
+                f"Age: {request['age']}\n"
+                f"Blood Group: {request['blood_group']}\n"
+                f"Hospital: {request['hospital_name']}\n"
+                f"Address: {request['hospital_address']}\n"
+                f"Urgency: {request['urgency']}\n"
+                f"Phone: `{request['phone']}`\n"
+                f"Username: {f'@{requester_username}' if requester_username else 'Not available'}\n\n"
+
+                f"*OPERATION DETAILS:*\n"
+                f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Status: Donor has accepted request\n\n"
+                f"Total successful operations to date: {total_operations}"
+            )
+
+            # Send notification to admin
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=admin_msg,
+                parse_mode='Markdown'
+            )
+
+            # Log the successful notification
+            logger.info(f"Admin notified about donation operation #{total_operations}")
+        except Exception as e:
+            logger.error(f"Error notifying admin about donation: {e}")
     except Exception as e:
         logger.error(f"Error notifying requester: {e}")
 
