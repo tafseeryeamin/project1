@@ -5,28 +5,30 @@ from datetime import datetime
 from dotenv import load_dotenv
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, \
     CallbackQueryHandler
-import database as db
 from telegram import Update
 from telegram.ext import ContextTypes
 import json
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from locations import BANGLADESH_DIVISIONS, BANGLADESH_DISTRICTS, ALL_DISTRICTS, get_division_for_district
 import telegram
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from database import store_support_message, get_support_messages, record_admin_reply, initialize_database,save_broadcast_message, update_broadcast_recipient_count, save_personalized_message,get_recent_broadcasts
-# Load environment variables
+import database as db
+from database import initialize_database
 load_dotenv()
 logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = os.getenv('ADMIN_ID')
-# Database setup
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, 'blood_bot.db')
+# Database configuration
+DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql:///blood_bot')
+
 # Enable logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
+
 logger = logging.getLogger(__name__)
 
 # Define conversation states for various flows
@@ -1086,24 +1088,12 @@ def get_compatible_donors(requested_blood_group: str) -> list:
 def get_total_successful_operations() -> int:
     """Get the total number of successful donation operations."""
     try:
-        conn = sqlite3.connect(db.DB_PATH)
-        cursor = conn.cursor()
-
-        # Count requests with at least one accepted donor
-        cursor.execute("""
-            SELECT COUNT(*) FROM requests 
-            WHERE donors_accepted IS NOT NULL 
-            AND donors_accepted != '[]'
-        """)
-
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count
-
+        # Use database function to get operations stats
+        stats = db.get_operations_stats()
+        return stats.get('total_operations', 0)
     except Exception as e:
         logger.error(f"Error counting successful operations: {e}")
         return 0
-
 
 async def handle_donation_decline(update: Update, context: ContextTypes.DEFAULT_TYPE, request_id: str,
                                   donor_id: str) -> None:
@@ -1279,7 +1269,6 @@ async def handle_donation_acceptance(update: Update, context: ContextTypes.DEFAU
             logger.error(f"Error notifying admin about donation: {e}")
     except Exception as e:
         logger.error(f"Error notifying requester: {e}")
-
 
 async def send_thanks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Send a thank you message to the donor."""
@@ -3169,28 +3158,19 @@ async def admin_system_maintenance(update: Update, context: ContextTypes.DEFAULT
 def is_user_restricted(telegram_id: int) -> bool:
     """Check if a user is restricted from using the bot."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        # Check if the is_restricted column exists
-        cursor.execute("PRAGMA table_info(donors)")
-        columns = [column[1] for column in cursor.fetchall()]
-
-        if 'is_restricted' not in columns:
-            conn.close()
-            return False
+        conn = db.get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         # Check if user is restricted
         cursor.execute(
-            'SELECT is_restricted FROM donors WHERE telegram_id = ?',
+            'SELECT is_restricted FROM donors WHERE telegram_id = %s',
             (telegram_id,)
         )
 
         result = cursor.fetchone()
         conn.close()
 
-        if result and result['is_restricted'] == 1:
+        if result and result['is_restricted']:
             return True
         return False
 
@@ -3219,103 +3199,53 @@ async def request_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def admin_database_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Create and send a database backup."""
-    # If called as a command rather than a callback
-    if hasattr(update, 'message'):
-        await update.message.reply_text(
-            "⚙️ *DATABASE BACKUP*\n\n"
-            "Creating database backup...",
-            parse_mode='Markdown'
-        )
+    """Explain PostgreSQL backup options."""
+    message = "⚠️ *DATABASE BACKUP NOTICE*\n\n" + \
+              "Your database is now PostgreSQL which cannot be backed up with a simple file copy.\n\n" + \
+              "Please use standard PostgreSQL backup tools like:\n" + \
+              "- `pg_dump` command line tool\n" + \
+              "- Database management tools\n" + \
+              "- Railway's built-in backup features\n\n" + \
+              "Contact your database administrator for more details."
 
-        try:
-            # Create a backup file
-            backup_file = f"blood_bot_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-            backup_path = os.path.join(BASE_DIR, backup_file)
-
-            # Copy the database
-            import shutil
-            shutil.copy2(db.DB_PATH, backup_path)
-
-            # Send the file to the admin
-            await context.bot.send_document(
-                chat_id=update.effective_user.id,
-                document=open(backup_path, 'rb'),
-                filename=backup_file,
-                caption="📁 Blood Bot Database Backup"
-            )
-
-            # Clean up
-            os.remove(backup_path)
-
-            await update.message.reply_text(
-                "✅ *DATABASE BACKUP*\n\n"
-                "Database backup created and sent successfully.",
-                parse_mode='Markdown'
-            )
-
-        except Exception as e:
-            logger.error(f"Error creating database backup: {e}")
-            await update.message.reply_text(
-                "❌ *DATABASE BACKUP ERROR*\n\n"
-                f"Failed to create backup: {str(e)}",
-                parse_mode='Markdown'
-            )
-    # If called via callback
-    elif hasattr(update, 'callback_query'):
-        query = update.callback_query
-        await query.answer()
-
-        await query.edit_message_text(
-            "⚙️ *DATABASE BACKUP*\n\n"
-            "Creating database backup...",
-            parse_mode='Markdown'
-        )
-
-        try:
-            # Create a backup file
-            backup_file = f"blood_bot_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-            backup_path = os.path.join(BASE_DIR, backup_file)
-
-            # Copy the database
-            import shutil
-            shutil.copy2(db.DB_PATH, backup_path)
-
-            # Send the file to the admin
-            await context.bot.send_document(
-                chat_id=update.effective_user.id,
-                document=open(backup_path, 'rb'),
-                filename=backup_file,
-                caption="📁 Blood Bot Database Backup"
-            )
-
-            # Clean up
-            os.remove(backup_path)
-
-            # Return to settings
-            keyboard = [[InlineKeyboardButton("Back to Settings", callback_data='admin_settings')]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            await query.edit_message_text(
-                "✅ *DATABASE BACKUP*\n\n"
-                "Database backup created and sent successfully.",
-                reply_markup=reply_markup,
-                parse_mode='Markdown'
-            )
-
-        except Exception as e:
-            logger.error(f"Error creating database backup: {e}")
+    try:
+        if hasattr(update, 'callback_query'):
+            query = update.callback_query
+            await query.answer()
 
             keyboard = [[InlineKeyboardButton("Back to Settings", callback_data='admin_settings')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await query.edit_message_text(
-                "❌ *DATABASE BACKUP ERROR*\n\n"
-                f"Failed to create backup: {str(e)}",
+                message,
                 reply_markup=reply_markup,
                 parse_mode='Markdown'
             )
+        else:
+            await update.message.reply_text(
+                message,
+                parse_mode='Markdown'
+            )
+    except Exception as e:
+        logger.error(f"Error displaying database backup information: {e}")
 
+        # Handle error based on update type
+        if hasattr(update, 'callback_query'):
+            keyboard = [[InlineKeyboardButton("Back to Settings", callback_data='admin_settings')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await update.callback_query.edit_message_text(
+                "❌ *DATABASE BACKUP ERROR*\n\n"
+                f"Error: {str(e)}",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                "❌ *DATABASE BACKUP ERROR*\n\n"
+                f"Error: {str(e)}",
+                parse_mode='Markdown'
+            )
 
 async def handle_admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle callback queries for admin dashboard."""
@@ -3653,15 +3583,15 @@ async def admin_mark_support_read(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
 
     try:
-        # Update database
-        conn = sqlite3.connect(DB_PATH)
+        # Update database with PostgreSQL
+        conn = db.get_db_connection()
         cursor = conn.cursor()
 
         cursor.execute('''
         UPDATE support_messages
-        SET status = 'read'
-        WHERE status = 'pending'
-        ''')
+        SET status = %s
+        WHERE status = %s
+        ''', ('read', 'pending'))
 
         rows_affected = cursor.rowcount
         conn.commit()
