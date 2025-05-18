@@ -18,24 +18,59 @@ DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql:///blood_bot')
 if DATABASE_URL.startswith('postgres://'):
     DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
 
-logger.info(f"Database URL format: {DATABASE_URL[:12]}...") # Log format without exposing credentials
+def print_db_info():
+    """Print database connection info without exposing credentials."""
+    # Only do this once at module initialization
+    try:
+        # Parse the URL to extract components without exposing credentials
+        from urllib.parse import urlparse
+        
+        parsed_url = urlparse(DATABASE_URL)
+        
+        logger.info(f"Database connection info:")
+        logger.info(f"- Host: {parsed_url.hostname}")
+        logger.info(f"- Port: {parsed_url.port}")
+        logger.info(f"- Database: {parsed_url.path[1:]}")  # Remove leading slash
+        logger.info(f"- SSL Mode: required")
+        logger.info(f"- Connection type: PostgreSQL")
+        
+        # Try to connect and get server version
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT version();")
+        version = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        
+        logger.info(f"Connected to: {version}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to print database info: {e}")
+        return False
+
+# Call this function once when the module is loaded
+print_db_info()
 
 def get_db_connection():
     """Get a connection to the PostgreSQL database."""
     try:
+        logger.info("Attempting to connect to database...")
         conn = psycopg2.connect(DATABASE_URL)
+        logger.info("Database connection successful")
         return conn
     except Exception as e:
-        print(f"Error connecting to database: {e}")
+        logger.error(f"Error connecting to database: {e}")
         raise
 
 def initialize_database():
     """Initialize database tables if they don't exist."""
     try:
+        logger.info("Initializing database tables...")
         conn = get_db_connection()
         cursor = conn.cursor()
         
         # Create donors table
+        logger.info("Creating donors table if not exists...")
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS donors (
             id SERIAL PRIMARY KEY,
@@ -47,13 +82,30 @@ def initialize_database():
             division VARCHAR(50),
             area VARCHAR(100),
             blood_group VARCHAR(5),
-            gender VARCHAR(10),
+            gender VARCHAR(20),
             registration_date TIMESTAMP,
             is_restricted BOOLEAN DEFAULT FALSE
         )
         ''')
         
+        # Check if we need to alter existing columns
+        try:
+            logger.info("Checking if we need to alter gender column...")
+            cursor.execute("ALTER TABLE donors ALTER COLUMN gender TYPE VARCHAR(20);")
+            logger.info("Gender column altered successfully")
+        except Exception as e:
+            # This will fail if the column is already the right size, which is fine
+            logger.info(f"Gender column already correct size or other error: {e}")
+            conn.rollback()  # Roll back the failed transaction
+            
+            # Get a fresh connection and cursor
+            cursor.close()
+            conn.close()
+            conn = get_db_connection()
+            cursor = conn.cursor()
+        
         # Create requests table
+        logger.info("Creating requests table if not exists...")
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS requests (
             id SERIAL PRIMARY KEY,
@@ -75,6 +127,7 @@ def initialize_database():
         ''')
         
         # Create donations table to track accepted donations
+        logger.info("Creating donations table if not exists...")
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS donations (
             id SERIAL PRIMARY KEY,
@@ -88,6 +141,7 @@ def initialize_database():
         ''')
         
         # Create support messages table
+        logger.info("Creating support_messages table if not exists...")
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS support_messages (
             id SERIAL PRIMARY KEY,
@@ -100,6 +154,7 @@ def initialize_database():
         ''')
         
         # Create admin replies table
+        logger.info("Creating admin_replies table if not exists...")
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS admin_replies (
             id SERIAL PRIMARY KEY,
@@ -111,6 +166,7 @@ def initialize_database():
         ''')
         
         # Create broadcast messages table
+        logger.info("Creating broadcast_messages table if not exists...")
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS broadcast_messages (
             id SERIAL PRIMARY KEY,
@@ -123,6 +179,7 @@ def initialize_database():
         ''')
         
         # Create personalized messages table
+        logger.info("Creating personalized_messages table if not exists...")
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS personalized_messages (
             id SERIAL PRIMARY KEY,
@@ -137,16 +194,19 @@ def initialize_database():
         cursor.close()
         conn.close()
         
-        print("Database initialized successfully")
+        logger.info("Database initialized successfully")
         return True
     except Exception as e:
-        print(f"Error initializing database: {e}")
+        logger.error(f"Error initializing database: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 # Donor functions
 def save_donor(donor_data):
     """Save a new donor to the database."""
     try:
+        logger.info(f"Saving donor: {donor_data['name']} (Telegram ID: {donor_data['telegram_id']})")
         conn = get_db_connection()
         cursor = conn.cursor()
         
@@ -173,9 +233,13 @@ def save_donor(donor_data):
         cursor.close()
         conn.close()
         
+        logger.info(f"Donor saved successfully with ID: {donor_id}")
         return donor_id
     except Exception as e:
-        print(f"Error saving donor: {e}")
+        logger.error(f"Error saving donor: {e}")
+        # If it's a unique constraint violation, log it specifically
+        if "duplicate key value violates unique constraint" in str(e):
+            logger.error(f"Duplicate donor Telegram ID: {donor_data.get('telegram_id')}")
         return None
 
 def get_donor_by_telegram_id(telegram_id):
@@ -452,16 +516,20 @@ def get_top_donors(limit=10, period=None):
 def save_request(request_data):
     """Save a new blood request to the database."""
     try:
+        logger.info(f"Saving blood request: {request_data['name']} (Blood Group: {request_data['blood_group']})")
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        cursor.execute('''
+        # Log the SQL query and parameters for debugging
+        query = '''
         INSERT INTO requests (
             telegram_id, name, age, hospital_name, hospital_address, 
             area, division, district, urgency, phone, blood_group, request_date, status
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
-        ''', (
+        '''
+        
+        params = (
             request_data['telegram_id'],
             request_data['name'],
             request_data['age'],
@@ -475,16 +543,26 @@ def save_request(request_data):
             request_data['blood_group'],
             request_data['request_date'],
             request_data['status']
-        ))
+        )
+        
+        logger.info(f"Executing query with params: {params}")
+        
+        cursor.execute(query, params)
         
         request_id = cursor.fetchone()[0]
+        logger.info(f"Request ID returned: {request_id}")
+        
         conn.commit()
         cursor.close()
         conn.close()
         
+        logger.info(f"Blood request saved successfully with ID: {request_id}")
         return request_id
     except Exception as e:
-        print(f"Error saving request: {e}")
+        logger.error(f"Error saving request: {e}")
+        # Print traceback for debugging
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 def get_request_by_id(request_id):
