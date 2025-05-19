@@ -4134,7 +4134,7 @@ async def admin_personalized_confirm(update: Update, context: ContextTypes.DEFAU
 
 
 async def admin_view_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """View message history."""
+    """View message history with delete options."""
     query = update.callback_query
     await query.answer()
 
@@ -4153,6 +4153,7 @@ async def admin_view_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
                     msg_preview = msg_preview[:47] + "..."
 
                 message += (
+                    f"*ID:* {bcast['id']}\n"
                     f"*Date:* {bcast['sent_date']}\n"
                     f"*Target:* {bcast['target_type']}\n"
                     f"*Recipients:* {bcast['recipient_count']}\n"
@@ -4162,12 +4163,26 @@ async def admin_view_messages(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             message += "No broadcast messages found.\n\n"
 
-        # Add back button
+        # Add broadcast management options
         keyboard = [
-            [InlineKeyboardButton("Send New Broadcast", callback_data='admin_broadcast_message')],
-            [InlineKeyboardButton("Send Personalized Message", callback_data='admin_personalized_message')],
-            [InlineKeyboardButton("Back to Dashboard", callback_data='admin_back_to_dashboard')]
+            [InlineKeyboardButton("Send New Broadcast", callback_data='admin_broadcast_message')]
         ]
+        
+        # Add delete buttons for each broadcast if any exist
+        if broadcasts:
+            message += "\nSelect a broadcast to delete:"
+            for bcast in broadcasts:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"🗑️ Delete Broadcast #{bcast['id']}", 
+                        callback_data=f"admin_delete_broadcast_{bcast['id']}"
+                    )
+                ])
+        
+        # Add navigation buttons
+        keyboard.append([InlineKeyboardButton("Send Personalized Message", callback_data='admin_personalized_message')])
+        keyboard.append([InlineKeyboardButton("Back to Dashboard", callback_data='admin_back_to_dashboard')])
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(
@@ -4238,6 +4253,92 @@ async def debug_admin_messaging(update: Update, context: ContextTypes.DEFAULT_TY
         parse_mode='Markdown'
     )
 
+def delete_broadcast_message(broadcast_id):
+    """Delete a broadcast message from the database."""
+    try:
+        conn = db.get_db_connection()
+        cursor = conn.cursor()
+        
+        # Execute the delete query
+        cursor.execute('DELETE FROM broadcast_messages WHERE id = %s', (broadcast_id,))
+        
+        # Get the number of affected rows to confirm deletion
+        affected_rows = cursor.rowcount
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        # Return True if a row was deleted, False otherwise
+        return affected_rows > 0
+    except Exception as e:
+        logger.error(f"Error deleting broadcast message: {e}")
+        return False
+
+# 2. Now, let's add functions to handle broadcast deletion in the main application:
+
+async def admin_delete_broadcast_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show prompt to delete a broadcast message."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Extract broadcast ID from callback data
+    parts = query.data.split('_')
+    if len(parts) < 4:
+        await query.message.reply_text("Invalid broadcast ID.")
+        return
+    
+    broadcast_id = parts[3]
+    
+    # Ask for confirmation
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"admin_confirm_delete_broadcast_{broadcast_id}")],
+        [InlineKeyboardButton("❌ No, Cancel", callback_data="admin_view_messages")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"⚠️ Are you sure you want to delete broadcast message #{broadcast_id}?\n\n"
+        f"This action cannot be undone.",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def admin_confirm_delete_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Confirm and delete a broadcast message."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Extract broadcast ID from callback data
+    parts = query.data.split('_')
+    if len(parts) < 5:
+        await query.message.reply_text("Invalid broadcast ID.")
+        return
+    
+    broadcast_id = parts[4]
+    
+    # Delete from database
+    success = delete_broadcast_message(broadcast_id)
+    
+    if success:
+        await query.edit_message_text(
+            f"✅ Broadcast message #{broadcast_id} has been deleted successfully.",
+            parse_mode='Markdown'
+        )
+    else:
+        await query.edit_message_text(
+            f"❌ Failed to delete broadcast message #{broadcast_id}.",
+            parse_mode='Markdown'
+        )
+    
+    # Add a button to return to message history
+    keyboard = [[InlineKeyboardButton("Back to Messages", callback_data="admin_view_messages")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.message.reply_text(
+        "Use the button below to return to message history.",
+        reply_markup=reply_markup
+    )
 
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
@@ -4447,6 +4548,8 @@ def main():
                                                  pattern='^refresh_donor_dashboard$'))
     application.add_handler(CallbackQueryHandler(lambda update, context: refresh_donor_dashboard(update),
                                                  pattern='^open_donor_dashboard$'))
+    application.add_handler(CallbackQueryHandler(admin_delete_broadcast_prompt, pattern='^admin_delete_broadcast_'))
+    application.add_handler(CallbackQueryHandler(admin_confirm_delete_broadcast, pattern='^admin_confirm_delete_broadcast_'))
 
     # Update the callback handler to include admin_view_support
     application.add_handler(CallbackQueryHandler(admin_view_support_messages, pattern='^admin_view_support$'))
