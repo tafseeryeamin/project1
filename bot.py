@@ -15,6 +15,10 @@ import telegram
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 import database as db
 from database import initialize_database
+from database import (save_broadcast_message, update_broadcast_recipient_count,
+                     get_recent_broadcasts, save_personalized_message, store_support_message,get_support_messages,record_admin_reply)
+
+
 load_dotenv()
 logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -3918,7 +3922,7 @@ async def admin_broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_
             )
             return ConversationHandler.END
 
-        # Save to database
+        # Save to database - using properly imported function
         broadcast_id = save_broadcast_message(
             admin_id=update.effective_user.id,
             message_text=broadcast_message,
@@ -4217,14 +4221,14 @@ async def debug_admin_messaging(update: Update, context: ContextTypes.DEFAULT_TY
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Send debugging info
+    # Send debugging info - Fixed to remove DB_PATH reference
     debug_info = (
         "🔍 *ADMIN MESSAGING DEBUG*\n\n"
         f"Admin ID: {admin_id}\n"
         f"User ID: {user_id}\n"
         f"Is Admin: {user_id == admin_id}\n"
         f"Current directory: {os.path.abspath('.')}\n"
-        f"DB exists: {os.path.exists(DB_PATH)}\n\n"
+        f"Database URL exists: {'DATABASE_URL' in os.environ}\n\n"
         f"Below are the messaging options:"
     )
 
@@ -4233,6 +4237,7 @@ async def debug_admin_messaging(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
+
 
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
